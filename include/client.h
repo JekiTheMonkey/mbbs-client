@@ -14,26 +14,44 @@ enum com_state {
     /* Read states */
     sst_lsn_rep,                        /* reply */
     sst_intro,                          /* wait for intro */
-    sst_dnl,                            /* downloading file */
+    sst_lsn_download,                   /* download reply */
+    sst_download,                       /* downloading file */
 
     /* Write states */
-    sst_upl,                            /* uploading file */
+    sst_upload,                         /* uploading file */
 
     /* Read/write states */
     sst_idle,                           /* idle */
 };
 
-struct client
-{
-    com_state state;
-    struct sockaddr_in serv_addr;
-    int sfd;
-    buffer *buf;
-    size_t written_bytes;
-    int demand_silence;
+/* cfl - Client FLag */
+enum cli_flags {
+    cfl_demand_silence      = 1 << 0,   /* don't write logo */
+    cfl_download_overwrite  = 1 << 1,   /* wait for permission to overwrite a file */
+    cfl_write_server        = 1 << 2,   /* send buffer contents to server */
+    cfl_handle_req          = 1 << 3,   /* handle requests */
 };
 
-void client_init(client *cli, char **argv);
-int client_start(client *cli);
+#define FLAGS_T int8_t
+
+struct cli_t
+{
+    com_state state;
+    FLAGS_T flags;
+    struct sockaddr_in serv_addr;
+
+    int sfd;
+    int udfd;
+
+    buf_t *io_buf;
+    buf_t *ud_file_buf;
+
+    size_t written_bytes;
+    size_t read_bytes;
+    size_t bytes_to_read;
+};
+
+void client_init(cli_t *cli, char **argv);
+int client_start(cli_t *cli);
 
 #endif /* CLIENT_H */

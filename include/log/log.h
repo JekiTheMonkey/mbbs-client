@@ -141,7 +141,7 @@
     #define LOG(...)                    ALL_UNUSED(__VA_ARGS__)
     #define LOG_E(...)                  ALL_UNUSED(__VA_ARGS__)
     #define LOG_L(...)                  ALL_UNUSED(__VA_ARGS__)
-    #define LOG_EX(...)                 LL_UNUSED(__VA_ARGS__)
+    #define LOG_EX(...)                 ALL_UNUSED(__VA_ARGS__)
     #define LOG_EC(...)                 ALL_UNUSED(__VA_ARGS__)
     #define LOG_LC(...)                 ALL_UNUSED(__VA_ARGS__)
     #define PLOG(...)                   ALL_UNUSED(__VA_ARGS__)
