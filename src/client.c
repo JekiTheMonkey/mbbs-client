@@ -14,8 +14,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* ############### Client related strings ############### */
-/* Commands */
+/* ######################### Client related strings ######################### */
+/* Service commands */
 #define CMD_DOW  "download"
 
 /* Messages for communication */
@@ -25,14 +25,17 @@
 #define LIN_2LG  "Your input line is too long. Try a shorter command..."
 #define F_EX     "Warning: File '%s' already exists, do you want to " \
     "overwrite it? [Y/N]: "
+#define IMP_OP   "Fatal error: You are trying to "
 
-/* ############### Client & Server related strings ############### */
+/* ##################### Client & Server related strings #################### */
+/* --- System commands --- */
 /* Server messages */
 #define DMD_SIL "DMD_SIL" /* Server has demanded silence - no invite msg */
-#define ALW_UPL "ALW_UPL" /* Server has allowed to send a file */
-#define ALW_DOW "ALW_DOW" /* Server has allowed to receive a file */
+#define DOW_DET "DOW_DET" /* Download file's details */
 /* Client messages */
 #define DOW_ACC "DOW_ACC" /* Accept to download a file */
+
+/* ########################################################################## */
 
 #define CMDMEMCMP(ptr, cmd) (memcmp(ptr, cmd, sizeof(cmd) - 1))
 #define LOG_RET(code) do { LOG_L("\n"); return code; } while(0)
@@ -107,12 +110,13 @@ void create_dir_if_not_exists(const char *path)
     }
 }
 
-void change_root_dir(cli_t *cli)
+void init_dow_dir_path(cli_t *cli)
 {
-/* TODO create a config that will allow to choose downloads destination */
-    UNUSED1(cli);
-    if (chdir(DEF_DOW_DIR) == -1)
-        PELOG_EX("Failed to change root directory");
+    /*
+     * TODO Create a config that will allow to choose downloads destination
+     */
+    cli->dow_dir_path = (char *) malloc(sizeof(DEF_DOW_DIR));
+    strcpy(cli->dow_dir_path, DEF_DOW_DIR);
 }
 
 void client_init(cli_t *cli, char **argv)
@@ -123,6 +127,7 @@ void client_init(cli_t *cli, char **argv)
     init_addr(&cli->serv_addr, argv);
     cli->io_buf = buffer_create(BUF_SIZE);
     cli->ud_file_buf = buffer_create(BUF_SIZE);
+    cli->req_file_buf = buffer_create(BUF_SIZE);
     cli->state = sst_unk;
     cli->flags = cfl_demand_silence;
     cli->written_bytes = 0;
@@ -130,7 +135,7 @@ void client_init(cli_t *cli, char **argv)
     cli->bytes_to_read = 0;
 
     create_dir_if_not_exists(DEF_DOW_DIR);
-    change_root_dir(cli);
+    init_dow_dir_path(cli);
     LOG_L("Client has been initialized\n");
 }
 
@@ -201,10 +206,20 @@ int open_download_file(cli_t *cli)
     if (fd == -1)
     {
         PELOG("Failed to create a file for download");
-        buffer_clear(cli->ud_file_buf);
         return -1;
     }
     return fd;
+}
+
+void download_prepare_request(cli_t *cli)
+{
+    buf_t *src = cli->req_file_buf, *dest = cli->io_buf;
+    assert(src->used > 0);
+    buffer_clear(dest);
+    buffer_append(dest, CMD_DOW, sizeof(CMD_DOW) - 1);
+    buffer_append(dest, " ", 1);
+    buffer_append(dest, src->ptr, src->used);
+    LOG("Request: '%s' (%lu)\n", (char *) dest->ptr, dest->used);
 }
 
 int check_flags(cli_t *cli)
@@ -212,7 +227,6 @@ int check_flags(cli_t *cli)
     int res = 0;
     FLAGS_T *flags = &cli->flags;
     buf_t *io_buf = cli->io_buf;
-    buf_t *ud_buf = cli->ud_file_buf;
     const char *ch_buf = (char *) io_buf->ptr;
     const unsigned len = io_buf->used;
     if (!*flags)
@@ -226,27 +240,30 @@ int check_flags(cli_t *cli)
         if (len == 0 || (len == 1 && tolower(ch_buf[0]) == 'y'))
         {
             LOG("Yes\n");
-            int fd = open_download_file(cli);
-            assert(fd != -1);
-            cli->udfd = fd;
-            LOG("Change state to %d\n", sst_lsn_download);
-            cli->state = sst_lsn_download;
             buffer_clear(io_buf);
-            buffer_append(io_buf, CMD_DOW, sizeof(CMD_DOW) - 1);
-            buffer_append(io_buf, " ", 1); /* space between tokens */
-            buffer_append(io_buf, ud_buf->ptr, ud_buf->used);
+            download_prepare_request(cli);
         }
         else
         {
             LOG("No\n");
             FLG_RM(*flags, cfl_write_server);
+            buffer_clear(cli->ud_file_buf);
+            buffer_clear(cli->req_file_buf);
             res++;
         }
-        FLG_RM(*flags, cfl_download_overwrite | cfl_handle_req);
+        FLG_RM(*flags, cfl_download_overwrite | cfl_handle_input);
         res++;
     }
     LOG_L("\n");
     return res;
+}
+
+int handle_empty(cli_t *cli)
+{
+    const buf_t *buf = cli->io_buf;
+    if (!buf->used)
+        FLG_RM(cli->flags, cfl_write_server);
+    return !buf->used;
 }
 
 /* int handle_upload_req(client *cli) */
@@ -285,46 +302,106 @@ int check_flags(cli_t *cli)
 /*     return 1; */
 /* } */
 
-int try_open_download_file(cli_t *cli)
+/*
+ * argv1 = command
+ * argv2 = file name on server
+ * argv3 (opt) = filepath on client's computer
+ */
+int copy_filepath(cli_t *cli)
+{
+    char *arg, *dow_dir = cli->dow_dir_path;
+    buf_t *buf = cli->io_buf;
+    buf_t *filepath = cli->ud_file_buf;
+
+    assert(filepath->used == 0);
+    const unsigned argc = buffer_count_argc(buf);
+    LOG_E("Arguments: %d\n", argc);
+    if (argc == 1 || argc > 3)
+        LOG_RET(0);
+    if (argc == 2) /* save in download directory with the same name */
+    {
+        arg = buffer_get_argv_n(buf, 2);
+        buffer_append(filepath, dow_dir, strlen(dow_dir));
+        buffer_append(filepath, "/", 1);
+    }
+    else /* argc == 3. save in a given path */
+        arg = buffer_get_argv_n(buf, 3);
+
+    assert(arg);
+    const unsigned skip_chs = (void *) arg - buf->ptr;
+    buffer_append(filepath, buf->ptr + skip_chs, buf->used - skip_chs);
+    buffer_append(filepath, "\0", 1);
+
+    LOG_L("Save filepath %d '%s'\n", (int) filepath->used, (char *) filepath->ptr);
+    return 1;
+}
+
+int check_download_file_existance(cli_t *cli)
 {
     const buf_t *buf = cli->ud_file_buf;
     const char *filepath = (char *) buf->ptr;
     assert(buf->used > 0);
+    LOG("Check if '%s' exists\n", filepath);
     if (file_exists(filepath))
     {
         printf(F_EX, filepath);
         fflush(stdout);
         FLG_ADD(cli->flags, cfl_download_overwrite | cfl_demand_silence);
         FLG_RM(cli->flags, cfl_write_server);
-        return 0;
+        return 1;
     }
+    return 0;
+}
+
+void save_requested_file(cli_t *cli)
+{
+    buf_t *src = cli->io_buf, *dest = cli->req_file_buf;
+    const unsigned argc = buffer_count_argc(src);
+    const char *begin, *end;
+    begin = buffer_get_argv_n(src, 2);
+    end = argc != 3 ? (char *) src->ptr + src->used :
+        find_space_n(begin, src->used - ((void *) begin - src->ptr));
+    assert(begin);
+    assert(end);
+    assert(dest->used == 0);
+    buffer_append(dest, begin, end - begin);
+}
+
+int try_create_download_file(cli_t *cli)
+{
+    const buf_t *buf = cli->ud_file_buf;
+    const char *filepath = (char *) buf->ptr;
+    assert(buf->used > 0);
+    LOG("Trying to create '%s'\n", filepath);
     int fd = open_download_file(cli);
-    return fd;
+    if (fd == -1)
+        return 0;
+    LOG("Close FD '%d'\n", fd);
+    close(fd);
+    return 1;
 }
 
 int check_download_request(cli_t *cli)
 {
     buf_t *buf = cli->io_buf;
-    buf_t *filepath = cli->ud_file_buf;
-    const unsigned len = sizeof(CMD_DOW) - 1;
-    const unsigned skip_chs = len + 1;
     if (CMDMEMCMP(buf->ptr, CMD_DOW))
         return 0;
 
     LOG_E("\n");
-    assert(filepath->used == 0);
-    if (buf->used < skip_chs)
-        return 1; /* 'download' without arguments has been written */
-    buffer_append(filepath, buf->ptr + skip_chs, buf->used - skip_chs);
-    buffer_append(filepath, "\0", 1);
-
-    int fd = try_open_download_file(cli);
-    if (fd <= 0)
+    save_requested_file(cli);
+    if (!copy_filepath(cli))
+        LOG_RET(1);
+    if (check_download_file_existance(cli))
         LOG_RET(-1);
-    cli->udfd = fd;
+    if (!try_create_download_file(cli))
+    {
+        FLG_RM(cli->flags, cfl_write_server);
+        buffer_clear(cli->ud_file_buf);
+        buffer_clear(cli->req_file_buf);
+        LOG_RET(-1);
+    }
+    download_prepare_request(cli);
     FLG_ADD(cli->flags, cfl_write_server | cfl_demand_silence);
-    LOG("Change state to %d\n", sst_lsn_download);
-    cli->state = sst_lsn_download;
     LOG_L("\n");
     return 1;
 }
@@ -340,11 +417,11 @@ int handle_req_idle(cli_t *cli)
     return 1;
 }
 
-int handle_requests(cli_t *cli)
+int handle_stdin_input(cli_t *cli)
 {
-    if (handle_req_idle(cli))
+    if (handle_empty(cli) ||
+        handle_req_idle(cli))
         return 1;
-    /* upload handle */
 
     LOG_EX("An unhandled state has been catched.\n");
     return 0;
@@ -356,7 +433,7 @@ void remove_lf(buf_t *buf)
         buffer_move_right(buf, 1);
 }
 
-int handle_stdin_input(cli_t *cli)
+int read_stdin_input(cli_t *cli)
 {
     buf_t *buf = cli->io_buf;
     assert(buf->used == 0);
@@ -375,23 +452,24 @@ int handle_stdin_read(cli_t *cli, fd_set *readfds)
         return 0;
 
     LOG_E("\n");
+    const com_state state = cli->state;
     buf_t *buf = cli->io_buf;
-    int res = handle_stdin_input(cli);
+    int res = read_stdin_input(cli);
     if (res < 0)
         LOG_RET(res == -2 ? 1 : -1);
 
     /* Handle requests and write input to server by default */
-    FLG_ADD(cli->flags, cfl_handle_req | cfl_write_server);
+    FLG_ADD(cli->flags, cfl_write_server | cfl_handle_input);
 
     if (check_flags(cli))
     {
         LOG("Flags:\n");
         FLG_PRINT(cli->flags);
     }
-    if (cli->flags & cfl_handle_req)
+    if (cli->flags & cfl_handle_input)
     {
-        handle_requests(cli);
-        FLG_RM(cli->flags, cfl_handle_req);
+        handle_stdin_input(cli);
+        FLG_RM(cli->flags, cfl_handle_input);
         LOG("Flags:\n");
         FLG_PRINT(cli->flags);
     }
@@ -400,8 +478,11 @@ int handle_stdin_read(cli_t *cli, fd_set *readfds)
         client_send_data(cli, buf->ptr, buf->used);
         FLG_ADD(cli->flags, cfl_demand_silence);
         FLG_RM(cli->flags, cfl_write_server);
-        LOG("Change state to %d\n", sst_lsn_rep);
-        cli->state = sst_lsn_rep;
+        if (state == cli->state)
+        {
+            LOG("Change state to %d\n", sst_lsn_rep);
+            cli->state = sst_lsn_rep;
+        }
     }
     buffer_clear(buf);
 
@@ -432,21 +513,27 @@ int handle_special_replies(cli_t *cli)
         buffer_move_left(buf, sizeof(DMD_SIL) - 1);
         FLG_ADD(cli->flags, cfl_demand_silence);
     }
-    /* else if (!CMDMEMCMP(buf->ptr, ALW_UPL)) */
+    /* else if (!CMDMEMCMP(buf->ptr, UPL_ALW)) */
     /* { */
     /* } */
-    else if (!CMDMEMCMP(buf->ptr, ALW_DOW))
+    else if (!CMDMEMCMP(buf->ptr, DOW_DET))
     {
-        LOG("Special reply - '%s'\n", ALW_DOW);
-        buffer_move_left(buf, sizeof(ALW_DOW) - 1);
+        LOG("Special reply - '%s'\n", DOW_DET);
+        buffer_move_left(buf, sizeof(DOW_DET) - 1);
         cli->bytes_to_read = atoi((char *) buf->ptr);
-        /* check if memory is enough to store the whole file */
-        FLG_ADD(cli->flags, cfl_demand_silence);
-        LOG("Change state to %d\n", sst_download);
-        cli->state = sst_download;
-        buffer_clear(buf);
-        CLIENT_SEND_CMD(cli, DOW_ACC);
         LOG_L("Bytes to download: %lu\n", cli->bytes_to_read);
+        /*
+         * TODO Check if memory is enough to store the whole file
+         */
+        cli->udfd = open_download_file(cli);
+        assert(cli->udfd != -1);
+        FLG_ADD(cli->flags, cfl_demand_silence);
+        LOG("Change state to %d\n", sst_lsn_download);
+        cli->state = sst_lsn_download;
+        buffer_clear(buf);
+        buffer_clear(cli->ud_file_buf);
+        buffer_clear(cli->req_file_buf);
+        CLIENT_SEND_CMD(cli, DOW_ACC);
         return 1;
     }
     else
@@ -485,7 +572,7 @@ int handle_lsn_idle(cli_t *cli)
 
 int handle_lsn_download(cli_t *cli)
 {
-    if (cli->state != sst_download)
+    if (cli->state != sst_lsn_download)
         return 0;
     LOG("Use this handle...\n");
     assert(cli->udfd > 2);
@@ -504,8 +591,17 @@ int handle_lsn_download(cli_t *cli)
         {
             write(1, TERM_DOW "\n", sizeof(TERM_DOW) + 1);
             cli->state = sst_idle;
+            cli->read_bytes = 0;
+            cli->bytes_to_read = 0;
             close(cli->udfd);
+            LOG("Download file descriptor '%d' has been closed\n", cli->udfd);
             cli->udfd = 0;
+        }
+        else
+        {
+            FLG_ADD(cli->flags, cfl_demand_silence);
+            LOG("Remained: '%lu'\n", cli->bytes_to_read - cli->read_bytes);
+            assert(cli->bytes_to_read - cli->read_bytes < 100000000);
         }
     }
     buffer_clear(buf);

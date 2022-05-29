@@ -17,6 +17,11 @@ int was_signaled(int code)
     return code == -1 && errno == EINTR;
 }
 
+int is_space(char ch)
+{
+    return ch == ' '  || ch == '\t';
+}
+
 int min(int lhs, int rhs)
 {
     return lhs > rhs ? rhs : lhs;
@@ -116,7 +121,19 @@ char *strrnfind(const char *str, char ch, size_t n)
     return NULL;
 }
 
-char *strnfindl(const char *str, char *chs, size_t n_ch, size_t n)
+char *strfindl(const char *str, const char *chs, size_t n_ch)
+{
+    size_t j;
+    for (; str; str++)
+    {
+        for (j = 0; j < n_ch; j++)
+            if (*str == chs[j])
+                return (char *) str;
+    }
+    return NULL;
+}
+
+char *strnfindl(const char *str, const char *chs, size_t n_ch, size_t n)
 {
     size_t j;
     for (; n; n--, str++)
@@ -210,4 +227,19 @@ void print_bits(const void *data, size_t bytes)
 void print_buf_bits(const buf_t *buf)
 {
     print_bits(buf->ptr, buf->used);
+}
+
+char *find_space_n(const char *buf, size_t n)
+{
+    const char delims[] = { ' ', '\t' };
+    return strnfindl(buf, delims, sizeof(delims), n);
+}
+
+char *skip_spaces_n(const char *buf, size_t n)
+{
+    if (!(buf = find_space_n(buf, n)))
+        return NULL;
+    for (; n && is_space(*buf); n--, buf++)
+        {   }
+    return (char *) buf;
 }

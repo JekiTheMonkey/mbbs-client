@@ -1,5 +1,6 @@
 #include "buffer.h"
 #include "log.h"
+#include "utility.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -71,4 +72,37 @@ void buffer_print_bin(const buf_t *buf)
     const char *data = buf->ptr;
     for (; n; n--, data++)
         printf("%c | %d\n", *data > 32 ? *data : ' ', *data);
+}
+
+size_t buffer_count_argc(const buf_t *buf)
+{
+    size_t argc = 0;
+    size_t n = buf->used;
+    const char *ch_buf = (char *) buf->ptr;
+    const char *it;
+    LOG("'%.*s'\n", (unsigned) buf->used, (char *) buf->ptr);
+    for (; ch_buf; argc++, ch_buf = it)
+    {
+        it = skip_spaces_n(ch_buf, n);
+        if (it)
+            n -= it - ch_buf;
+        if (!n)
+            return argc;
+    }
+    return argc;
+}
+
+char *buffer_get_argv_n(buf_t *buf, size_t n)
+{
+    assert(buffer_count_argc(buf) >= n);
+    n--; /* n = arguments to skip */
+    char *it, *data = buf->ptr;
+    size_t bytes = buf->used;
+    for (; n; n--)
+    {
+        it = skip_spaces_n(data, bytes);
+        bytes -= it - data;
+        data = it;
+    }
+    return data;
 }
