@@ -185,6 +185,7 @@ int file_exists(const char *path)
 
 int open_file(const char *path, int flag, int perms)
 {
+    LOG("Passed filename '%s'\n", path);
     int fd = open(path, flag, perms);
     if (fd == -1)
         PELOG("Failed to open a file");

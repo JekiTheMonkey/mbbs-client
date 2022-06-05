@@ -1,3 +1,4 @@
+#define _XOPEN_SOURCE 500 /* snprintf */
 #include "buffer.h"
 #include "client.h"
 #include "flags.h"
@@ -8,8 +9,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
+#include <stdlib.h>
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -17,10 +18,12 @@
 /* ######################### Client related strings ######################### */
 /* Service commands */
 #define CMD_DOW  "download"
+#define CMD_UPL  "upload"
 
 /* Messages for communication */
 #define TERM_MSG "Terminating own work..."
-#define TERM_DOW "File has been downloaded successfully"
+#define TERM_DOW "File has been successfully downloaded"
+#define TERM_UPL "File has been successfully uploaded"
 
 #define LIN_2LG  "Your input line is too long. Try a shorter command..."
 #define F_EX     "Warning: File '%s' already exists, do you want to " \
@@ -32,6 +35,7 @@
 /* Server messages */
 #define DMD_SIL "DMD_SIL" /* Server has demanded silence - no invite msg */
 #define DOW_DET "DOW_DET" /* Download file's details */
+#define UPL_ALW "UPL_ALW" /* Server has allowed to upload a file */
 /* Client messages */
 #define DOW_ACC "DOW_ACC" /* Accept to download a file */
 
@@ -130,7 +134,7 @@ void client_init(cli_t *cli, char **argv)
     cli->req_file_buf = buffer_create(BUF_SIZE);
     cli->state = sst_unk;
     cli->flags = cfl_demand_silence;
-    cli->written_bytes = 0;
+    cli->bytes_to_write = 0;
     cli->read_bytes = 0;
     cli->bytes_to_read = 0;
 
@@ -156,6 +160,8 @@ int init_fds(cli_t *cli, fd_set *readfds, fd_set *writefds)
     FD_ZERO(writefds);
     FD_SET(cli->sfd, readfds);
     FD_SET(0, readfds); /* stdin */
+    if (cli->state == sst_upload)
+        FD_SET(cli->sfd, writefds);
     return cli->sfd;
 }
 
@@ -365,7 +371,7 @@ void save_requested_file(cli_t *cli)
     assert(end);
     if (dest->used != 0)
         LOG("dest->used '%lu'\n", dest->used);
-    assert(dest->used == 0);
+    buffer_clear(dest);
     buffer_append(dest, begin, end - begin);
 }
 
@@ -408,11 +414,63 @@ int check_download_request(cli_t *cli)
     return 1;
 }
 
+void copy_upload_filename(buf_t *dest, const buf_t *src)
+{
+    const char delims[] = { ' ', '\t', '\0' };
+    const char *filename = buffer_get_argv_n((buf_t *) src, 2);
+    assert(filename);
+    const unsigned offset = (void *) filename - src->ptr;
+    const char *end =
+        strnfindl(filename, delims, sizeof(delims), src->used - offset);
+    assert(end);
+    const int len = end - filename;
+
+    LOG("To copy(%d): '%.*s'\n", len, len, filename);
+    memmove(dest->ptr, filename, len);
+    memset(dest->ptr + len, 0, 1);
+    dest->used = len + 1;
+}
+
+int check_upload_request(cli_t *cli)
+{
+    buf_t *buf = cli->io_buf;
+    if (CMDMEMCMP(buf->ptr, CMD_UPL))
+        return 0;
+
+    LOG_E("\n");
+    char *source = buffer_get_argv_n(buf, 2);
+    if (!source)
+        LOG_RET(1);
+    char *file = buffer_get_argv_n(buf, 3);
+    if (!file) /* upload file with original name */
+        file = source;
+    buffer_append(buf, "", 1);
+    buffer_clear(cli->ud_file_buf);
+    copy_upload_filename(cli->ud_file_buf, buf);
+
+    int fd = open_file((char *) cli->ud_file_buf->ptr, O_RDONLY, 0);
+    if (fd == -1)
+    {
+        FLG_RM(cli->flags, cfl_write_server);
+        LOG_RET(-1);
+    }
+    const size_t size = get_file_len(fd);
+    buf->used =
+        snprintf((char *) buf->ptr, buf->size, CMD_UPL " %s %lu", file, size);
+    LOG("Formed message: '%.*s'\n", (int) buf->used, (char *) buf->ptr);
+    cli->bytes_to_write = size;
+
+    close(fd);
+    LOG_L("\n");
+    return 1;
+}
+
 int handle_req_idle(cli_t *cli)
 {
     if (cli->state != sst_idle)
         return 0;
-    if (check_download_request(cli))
+    if (check_download_request(cli) ||
+        check_upload_request(cli))
         return 1;
     LOG("Change state to %d\n", sst_lsn_rep);
     cli->state = sst_lsn_rep;
@@ -505,57 +563,64 @@ int handle_lsn_intro(cli_t *cli)
     return 1;
 }
 
+int handle_cmd_dmd_sil(cli_t *cli)
+{
+    buf_t *buf = cli->io_buf;
+    buffer_move_left(buf, sizeof(DMD_SIL) - 1);
+    FLG_ADD(cli->flags, cfl_demand_silence);
+    return 1;
+}
+
+int handle_cmd_dow_det(cli_t *cli)
+{
+    buf_t *buf = cli->io_buf;
+    buffer_move_left(buf, sizeof(DOW_DET) - 1);
+    cli->bytes_to_read = atoi((char *) buf->ptr);
+    LOG("Bytes to download: %lu\n", cli->bytes_to_read);
+    /*
+     * TODO Check if memory is enough to store the whole file
+     */
+    cli->udfd = open_download_file(cli);
+    assert(cli->udfd != -1);
+    FLG_ADD(cli->flags, cfl_demand_silence);
+    LOG("Change state to %d\n", sst_lsn_download);
+    cli->state = sst_lsn_download;
+    buffer_clear(buf);
+    buffer_clear(cli->ud_file_buf);
+    buffer_clear(cli->req_file_buf);
+    CLIENT_SEND_CMD(cli, DOW_ACC);
+    return 2;
+}
+
+int handle_cmd_upl_alw(cli_t *cli)
+{
+    buf_t *buf = cli->io_buf;
+    LOG("Opening '%s'...\n", (char *) cli->ud_file_buf->ptr);
+    cli->udfd = open_file((char *) cli->ud_file_buf->ptr, O_RDONLY, 0);
+    assert(cli->udfd != -1);
+    FLG_ADD(cli->flags, cfl_demand_silence);
+    LOG("Change state to %d\n", sst_upload);
+    cli->state = sst_upload;
+    buffer_clear(buf);
+    buffer_clear(cli->ud_file_buf);
+    buffer_clear(cli->req_file_buf);
+    return 2;
+}
+
 int handle_special_replies(cli_t *cli)
 {
-    LOG_E("\n");
     buf_t *buf = cli->io_buf;
+    const char *cmd = (char *) buf->ptr;
+    LOG_E("Command: '%.*s'\n", (int) buf->used, cmd);
 
-    /*
-     * If client doesn't give permission to download a file, buffer with
-     * filename and other, related to the request, will be filled with
-     * information that is no longer required, and if another request will be
-     * made it will fail due the buffers are not empty. This buffer clear is a
-     * boilerplate, should be cleaned only after a failed request instead
-     */
-    if (CMDMEMCMP(buf->ptr, DOW_DET))
-    {
-        buffer_clear(cli->ud_file_buf);
-        buffer_clear(cli->req_file_buf);
-    }
-
-    if (!CMDMEMCMP(buf->ptr, DMD_SIL))
-    {
-        LOG("Special reply - '%s'\n", DMD_SIL);
-        buffer_move_left(buf, sizeof(DMD_SIL) - 1);
-        FLG_ADD(cli->flags, cfl_demand_silence);
-    }
-    /* else if (!CMDMEMCMP(buf->ptr, UPL_ALW)) */
-    /* { */
-    /* } */
-    else if (!CMDMEMCMP(buf->ptr, DOW_DET))
-    {
-        LOG("Special reply - '%s'\n", DOW_DET);
-        buffer_move_left(buf, sizeof(DOW_DET) - 1);
-        cli->bytes_to_read = atoi((char *) buf->ptr);
-        LOG_L("Bytes to download: %lu\n", cli->bytes_to_read);
-        /*
-         * TODO Check if memory is enough to store the whole file
-         */
-        cli->udfd = open_download_file(cli);
-        assert(cli->udfd != -1);
-        FLG_ADD(cli->flags, cfl_demand_silence);
-        LOG("Change state to %d\n", sst_lsn_download);
-        cli->state = sst_lsn_download;
-        buffer_clear(buf);
-        buffer_clear(cli->ud_file_buf);
-        buffer_clear(cli->req_file_buf);
-        CLIENT_SEND_CMD(cli, DOW_ACC);
-        return 1;
-    }
+    if (!CMDMEMCMP(cmd, DMD_SIL) && handle_cmd_dmd_sil(cli) > 2)
+        LOG_RET(1);
+    else if (!CMDMEMCMP(cmd, DOW_DET) && handle_cmd_dow_det(cli) > 2)
+        LOG_RET(1);
+    else if (!CMDMEMCMP(cmd, UPL_ALW) && handle_cmd_upl_alw(cli) > 2)
+        LOG_RET(1);
     else
-    {
         LOG("No special reply has been found\n");
-    }
     LOG_L("\n");
     return 0;
 }
@@ -567,7 +632,10 @@ int handle_lsn_reply(cli_t *cli)
     LOG("Use this handle...\n");
     buf_t *buf = cli->io_buf;
     if (handle_special_replies(cli))
+    {
+        LOG("Return due some special reply\n");
         return 1;
+    }
     write(1, buf->ptr, buf->used);
     buffer_clear(buf);
     LOG("Change state to %d\n", sst_idle);
@@ -584,6 +652,17 @@ int handle_lsn_idle(cli_t *cli)
     write(1, buf->ptr, buf->used);
     buffer_clear(buf);
     return 1;
+}
+
+void terminate_download(cli_t *cli)
+{
+    write(1, TERM_DOW "\n", sizeof(TERM_DOW) + 1);
+    cli->state = sst_idle;
+    cli->read_bytes = 0;
+    cli->bytes_to_read = 0;
+    close(cli->udfd);
+    LOG("Download file descriptor '%d' has been closed\n", cli->udfd);
+    cli->udfd = 0;
 }
 
 int handle_lsn_download(cli_t *cli)
@@ -604,20 +683,11 @@ int handle_lsn_download(cli_t *cli)
     {
         cli->read_bytes += res;
         if (cli->read_bytes == cli->bytes_to_read)
-        {
-            write(1, TERM_DOW "\n", sizeof(TERM_DOW) + 1);
-            cli->state = sst_idle;
-            cli->read_bytes = 0;
-            cli->bytes_to_read = 0;
-            close(cli->udfd);
-            LOG("Download file descriptor '%d' has been closed\n", cli->udfd);
-            cli->udfd = 0;
-        }
+            terminate_download(cli);
         else
         {
             FLG_ADD(cli->flags, cfl_demand_silence);
             LOG("Remained: '%lu'\n", cli->bytes_to_read - cli->read_bytes);
-            assert(cli->bytes_to_read - cli->read_bytes < 100000000);
         }
     }
     buffer_clear(buf);
@@ -635,6 +705,11 @@ int handle_lsn_download(cli_t *cli)
 #define HDL_LSN(lsn_to, cli) \
     do { \
         res = handle_lsn_ ##lsn_to (cli); \
+        _HDL_RES(res); \
+    } while(0)
+#define HDL_WRITE(write_to, cli) \
+    do { \
+        res = handle_write_ ##write_to (cli); \
         _HDL_RES(res); \
     } while(0)
 
@@ -669,13 +744,59 @@ int handle_server_read(cli_t *cli, fd_set *readfds)
     return 1;
 }
 
+void terminate_upload(cli_t *cli)
+{
+    write(1, TERM_UPL "\n", sizeof(TERM_UPL) + 1);
+    cli->state = sst_idle;
+    cli->written_bytes = 0;
+    cli->bytes_to_write = 0;
+    close(cli->udfd);
+    LOG("Upload file descriptor '%d' has been closed\n", cli->udfd);
+    cli->udfd = 0;
+    LOG("Change state to %d\n", sst_idle);
+    cli->state = sst_idle;
+    buffer_clear(cli->req_file_buf);
+}
+
+int handle_write_upload(cli_t *cli)
+{
+    if (cli->state != sst_upload)
+        return 0;
+    LOG("Use this handle...\n");
+    assert(cli->udfd > 2);
+
+    buf_t *buf = cli->io_buf;
+    int res = read(cli->udfd, buf->ptr, buf->size);
+    LOG("Read data - '%.*s'\n", res, (char *) buf->ptr);
+    res = client_send_data(cli, buf->ptr, res);
+    if (res == -1)
+    {
+        PELOG("Failed to read upload file");
+        cli->state = sst_disc;
+    }
+    else
+    {
+        cli->written_bytes += res;
+        if (cli->written_bytes == cli->bytes_to_write)
+            terminate_upload(cli);
+        else
+        {
+            FLG_ADD(cli->flags, cfl_demand_silence);
+            LOG("Remained: '%lu'\n", cli->bytes_to_write - cli->written_bytes);
+        }
+    }
+
+    return 1;
+}
+
 int handle_server_write(cli_t *cli, fd_set *writefds)
 {
     if (!FD_ISSET(cli->sfd, writefds))
         return 0;
 
+    int res;
     LOG_E("\n");
-    /* handle file uploading */
+    HDL_WRITE(upload, cli);
     LOG_L("\n");
     return 1;
 }

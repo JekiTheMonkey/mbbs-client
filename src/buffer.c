@@ -95,7 +95,8 @@ size_t buffer_count_argc(const buf_t *buf)
 
 char *buffer_get_argv_n(buf_t *buf, size_t n)
 {
-    assert(buffer_count_argc(buf) >= n);
+    if (buffer_count_argc(buf) < n)
+        return NULL;
     n--; /* n = arguments to skip */
     char *it, *data = buf->ptr;
     size_t bytes = buf->used;

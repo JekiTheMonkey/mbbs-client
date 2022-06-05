@@ -48,6 +48,7 @@ struct cli_t
     char *dow_dir_path;
 
     size_t written_bytes;
+    size_t bytes_to_write;
     size_t read_bytes;
     size_t bytes_to_read;
 };

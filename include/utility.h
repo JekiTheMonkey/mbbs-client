@@ -12,7 +12,7 @@ int was_signaled(int code);
 int min(int lhs, int rhs);
 int max(int lhs, int rhs);
 
-char *strdup(char *src);
+/* char *strdup(char *src); */
 char *strndup(char *src, size_t n);
 size_t strncount(const char *str, char ch, size_t n);
 int stricmp(const char *lhs, const char *rhs);
