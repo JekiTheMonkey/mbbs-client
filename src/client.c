@@ -216,9 +216,8 @@ void download_prepare_request(cli_t *cli)
     buf_t *src = cli->req_file_buf, *dest = cli->io_buf;
     assert(src->used > 0);
     buffer_clear(dest);
-    buffer_append(dest, CMD_DOW, sizeof(CMD_DOW) - 1);
-    buffer_append(dest, " ", 1);
-    buffer_append(dest, src->ptr, src->used);
+    buffer_appendf(dest, "%.*s %.*s",
+        (int) sizeof(CMD_DOW) - 1, CMD_DOW, (int) src->used, src->ptr);
     LOG("Request: '%s' (%lu)\n", (char *) dest->ptr, dest->used);
 }
 
@@ -321,18 +320,19 @@ int copy_filepath(cli_t *cli)
     if (argc == 2) /* save in download directory with the same name */
     {
         arg = buffer_get_argv_n(buf, 2);
-        buffer_append(filepath, dow_dir, strlen(dow_dir));
-        buffer_append(filepath, "/", 1);
+        buffer_appendf(filepath, "%s/", dow_dir);
+        LOG("First step: '%s'\n", (char *) filepath->ptr);
     }
     else /* argc == 3. save in a given path */
         arg = buffer_get_argv_n(buf, 3);
 
     assert(arg);
     const unsigned skip_chs = (void *) arg - buf->ptr;
-    buffer_append(filepath, buf->ptr + skip_chs, buf->used - skip_chs);
-    buffer_append(filepath, "\0", 1);
+    buffer_appendf(
+        filepath, "%.*s", buf->used - skip_chs, (char *) buf->ptr + skip_chs);
 
-    LOG_L("Save filepath %d '%s'\n", (int) filepath->used, (char *) filepath->ptr);
+    LOG_L("Saved filepath %d '%s'\n",
+        (int) filepath->used, (char *) filepath->ptr);
     return 1;
 }
 
@@ -363,6 +363,8 @@ void save_requested_file(cli_t *cli)
         find_space_n(begin, src->used - ((void *) begin - src->ptr));
     assert(begin);
     assert(end);
+    if (dest->used != 0)
+        LOG("dest->used '%lu'\n", dest->used);
     assert(dest->used == 0);
     buffer_append(dest, begin, end - begin);
 }
@@ -507,6 +509,20 @@ int handle_special_replies(cli_t *cli)
 {
     LOG_E("\n");
     buf_t *buf = cli->io_buf;
+
+    /*
+     * If client doesn't give permission to download a file, buffer with
+     * filename and other, related to the request, will be filled with
+     * information that is no longer required, and if another request will be
+     * made it will fail due the buffers are not empty. This buffer clear is a
+     * boilerplate, should be cleaned only after a failed request instead
+     */
+    if (CMDMEMCMP(buf->ptr, DOW_DET))
+    {
+        buffer_clear(cli->ud_file_buf);
+        buffer_clear(cli->req_file_buf);
+    }
+
     if (!CMDMEMCMP(buf->ptr, DMD_SIL))
     {
         LOG("Special reply - '%s'\n", DMD_SIL);

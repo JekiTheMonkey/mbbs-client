@@ -8,7 +8,6 @@
 #define STR(x) #x
 
 int was_signaled(int code);
-int is_space(char ch);
 
 int min(int lhs, int rhs);
 int max(int lhs, int rhs);

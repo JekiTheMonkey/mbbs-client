@@ -17,11 +17,6 @@ int was_signaled(int code)
     return code == -1 && errno == EINTR;
 }
 
-int is_space(char ch)
-{
-    return ch == ' '  || ch == '\t';
-}
-
 int min(int lhs, int rhs)
 {
     return lhs > rhs ? rhs : lhs;
@@ -239,7 +234,7 @@ char *skip_spaces_n(const char *buf, size_t n)
 {
     if (!(buf = find_space_n(buf, n)))
         return NULL;
-    for (; n && is_space(*buf); n--, buf++)
+    for (; n && isspace(*buf); n--, buf++)
         {   }
     return (char *) buf;
 }

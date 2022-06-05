@@ -29,5 +29,6 @@ void buffer_clear(buf_t *buf);
 void buffer_print_bin(const buf_t *buf);
 size_t buffer_count_argc(const buf_t *buf);
 char *buffer_get_argv_n(buf_t *buf, size_t n);
+int buffer_appendf(buf_t *buf, const char *format, ...);
 
 #endif /* !BUFFER_H */

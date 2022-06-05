@@ -2,6 +2,7 @@
 #include "log.h"
 #include "utility.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -105,4 +106,16 @@ char *buffer_get_argv_n(buf_t *buf, size_t n)
         data = it;
     }
     return data;
+}
+
+int buffer_appendf(buf_t *buf, const char *format, ...)
+{
+    va_list vl;
+    va_start(vl, format);
+    int res = vsprintf((char *) buf->ptr + buf->used, format, vl);
+    LOG("Added bytes: '%d'\n", res);
+    va_end(vl);
+    buf->used += res;
+    assert(buf->used + res <= buf->size);
+    return res;
 }
